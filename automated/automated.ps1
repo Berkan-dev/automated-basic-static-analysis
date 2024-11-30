@@ -2,6 +2,12 @@
 $filePath = Read-Host "Enter the file path"
 $apiKey = Read-Host "Enter VirusTotal API key"
 
+# Validate the file path
+if (-Not (Test-Path $filePath)) {
+    Write-Error "Error: File not found at path $filePath. Please provide a valid file path."
+    exit
+}
+
 # Calculate SHA256 and MD5 hashes
 Write-Output "Calculating file hashes..."
 $sha256 = (Get-FileHash -Path $filePath -Algorithm SHA256).Hash
@@ -11,52 +17,49 @@ Write-Output "MD5: $md5"
 
 # Run FLOSS and save output
 Write-Output "Running FLOSS..."
-flossOutputPath = "$PSScriptRoot\flossoutput.txt"
-flossCommand = "floss $filePath > $flossOutputPath"
+$flossOutputPath = Join-Path -Path $PSScriptRoot -ChildPath "flossoutput.txt"
+$flossCommand = "floss $filePath > `"$flossOutputPath`""
 Invoke-Expression $flossCommand
 Write-Output "FLOSS output saved to $flossOutputPath"
 
-# Check for packed sections (entropy analysis)
-Function Check-Entropy {
-    param (
-        [array]$sections,
-        [string]$fileType
-    )
-    $packedSections = @()
-    foreach ($section in $sections) {
-        $entropy = if ($fileType -eq "PE") { $section.GetEntropy() } else { $section.Entropy }
-        if ($entropy -gt 7.5) {
-            $packedSections += $section.Name
-        }
-    }
-    return $packedSections
-}
-
+# Analyze the file for packing
 Function Analyze-FilePacking {
     param (
         [string]$filePath
     )
+
     Write-Output "Analyzing file for packing..."
-    $fileType = Get-Content -Path $filePath -TotalCount 4 -AsByteStream
-    if ($fileType[0] -eq 0x4D -and $fileType[1] -eq 0x5A) {
-        Write-Output "Detected PE format."
-        # PE Analysis - External PE Tools like PE Studio could be integrated here
-        $packedSections = @() # Simulate entropy analysis here.
-        if ($packedSections.Count -gt 0) {
-            Write-Output "Packed sections detected: $($packedSections -join ', ')"
+    try {
+        # Read the first 4 bytes of the file
+        $fileStream = [System.IO.File]::Open($filePath, 'Open', 'Read', 'None')
+        $binaryReader = New-Object System.IO.BinaryReader($fileStream)
+        $fileHeader = $binaryReader.ReadBytes(4)
+        $binaryReader.Close()
+        $fileStream.Close()
+
+        # Check the file header for PE or ELF format
+        if ($fileHeader[0] -eq 0x4D -and $fileHeader[1] -eq 0x5A) {
+            Write-Output "Detected PE format."
+            # Simulated entropy analysis (expandable)
+            $packedSections = @() 
+            if ($packedSections.Count -gt 0) {
+                Write-Output "Packed sections detected: $($packedSections -join ', ')"
+            } else {
+                Write-Output "No packed sections detected."
+            }
+        } elseif ($fileHeader[0] -eq 0x7F -and $fileHeader[1] -eq 0x45 -and $fileHeader[2] -eq 0x4C -and $fileHeader[3] -eq 0x46) {
+            Write-Output "Detected ELF format."
+            $packedSections = @()
+            if ($packedSections.Count -gt 0) {
+                Write-Output "Packed sections detected: $($packedSections -join ', ')"
+            } else {
+                Write-Output "No packed sections detected."
+            }
         } else {
-            Write-Output "No packed sections detected."
+            Write-Output "Unsupported file format."
         }
-    } elseif ($fileType[0] -eq 0x7F -and $fileType[1] -eq 0x45 -and $fileType[2] -eq 0x4C -and $fileType[3] -eq 0x46) {
-        Write-Output "Detected ELF format."
-        $packedSections = @() # Simulate entropy analysis here.
-        if ($packedSections.Count -gt 0) {
-            Write-Output "Packed sections detected: $($packedSections -join ', ')"
-        } else {
-            Write-Output "No packed sections detected."
-        }
-    } else {
-        Write-Output "Unsupported file format."
+    } catch {
+        Write-Error "Error analyzing file format: $_"
     }
 }
 
@@ -64,16 +67,20 @@ Analyze-FilePacking -filePath $filePath
 
 # Extract URLs from FLOSS output
 Write-Output "Extracting URLs from FLOSS output..."
-$urls = Select-String -Path $flossOutputPath -Pattern "http" | ForEach-Object { $_.Line }
-if ($urls) {
-    Write-Output "Found URLs:"
-    $urls | ForEach-Object { Write-Output $_ }
+if (Test-Path $flossOutputPath) {
+    $urls = Select-String -Path $flossOutputPath -Pattern "http" | ForEach-Object { $_.Line }
+    if ($urls) {
+        Write-Output "Found URLs:"
+        $urls | ForEach-Object { Write-Output $_ }
+    } else {
+        Write-Output "No URLs found in FLOSS output."
+    }
 } else {
-    Write-Output "No URLs found in FLOSS output."
+    Write-Error "FLOSS output file not found at $flossOutputPath."
 }
 
 # Compare FLOSS output with malicious API list
-$maliciousAPIPath = "$PSScriptRoot\malapi.txt"
+$maliciousAPIPath = Join-Path -Path $PSScriptRoot -ChildPath "malapi.txt"
 if (Test-Path $maliciousAPIPath -and Test-Path $flossOutputPath) {
     $maliciousAPIs = Get-Content -Path $maliciousAPIPath
     $flossOutput = Get-Content -Path $flossOutputPath
@@ -85,7 +92,7 @@ if (Test-Path $maliciousAPIPath -and Test-Path $flossOutputPath) {
         Write-Output "No malicious API calls found."
     }
 } else {
-    Write-Output "Malicious API list or FLOSS output not found."
+    Write-Error "Malicious API list or FLOSS output not found."
 }
 
 # VirusTotal Analysis
@@ -117,4 +124,3 @@ try {
 }
 
 Write-Output "Process completed."
-
