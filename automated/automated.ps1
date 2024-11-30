@@ -1,126 +1,182 @@
-# Input file and VirusTotal API key
-$filePath = Read-Host "Enter the file path"
-$apiKey = Read-Host "Enter VirusTotal API key"
-
-# Validate the file path
-if (-Not (Test-Path $filePath)) {
-    Write-Error "Error: File not found at path $filePath. Please provide a valid file path."
-    exit
-}
-
-# Calculate SHA256 and MD5 hashes
-Write-Output "Calculating file hashes..."
-$sha256 = (Get-FileHash -Path $filePath -Algorithm SHA256).Hash
-$md5 = (Get-FileHash -Path $filePath -Algorithm MD5).Hash
-Write-Output "SHA256: $sha256"
-Write-Output "MD5: $md5"
-
-# Run FLOSS and save output
-Write-Output "Running FLOSS..."
-$flossOutputPath = Join-Path -Path $PSScriptRoot -ChildPath "flossoutput.txt"
-$flossCommand = "floss $filePath > `"$flossOutputPath`""
-Invoke-Expression $flossCommand
-Write-Output "FLOSS output saved to $flossOutputPath"
-
-# Analyze the file for packing
-Function Analyze-FilePacking {
+# Function to analyze PE files using FLOSS
+function Analyze-PEFile {
     param (
         [string]$filePath
     )
 
-    Write-Output "Analyzing file for packing..."
+    # Run FLOSS command for PE files
+    $flossCommand = "floss $filePath > flossoutput.txt"
+    Invoke-Expression $flossCommand
+    Write-Host "FLOSS output saved as flossoutput.txt"
+    
+    # Perform packing analysis for PE files
+    Analyze-PEPacking -filePath $filePath
+}
+
+# Function to analyze ELF files using 'strings' and check for packed sections
+function Analyze-ELFFile {
+    param (
+        [string]$filePath
+    )
+
+    # Run 'strings' command for ELF files
+    $stringsCommand = "strings $filePath > flossoutput.txt"
+    Invoke-Expression $stringsCommand
+    Write-Host "Strings output saved as flossoutput.txt"
+    
+    # Perform packing analysis for ELF files
+    Analyze-ELFPacking -filePath $filePath
+}
+
+# Function to analyze packing in PE files using entropy (high entropy suggests packing)
+function Analyze-PEPacking {
+    param (
+        [string]$filePath
+    )
+
     try {
-        # Read the first 4 bytes of the file
-        $fileStream = [System.IO.File]::Open($filePath, 'Open', 'Read', 'None')
-        $binaryReader = New-Object System.IO.BinaryReader($fileStream)
-        $fileHeader = $binaryReader.ReadBytes(4)
-        $binaryReader.Close()
-        $fileStream.Close()
+        # Load the PE file using pefile module (via Python)
+        $pythonScript = @"
+import pefile
+import sys
 
-        # Check the file header for PE or ELF format
-        if ($fileHeader[0] -eq 0x4D -and $fileHeader[1] -eq 0x5A) {
-            Write-Output "Detected PE format."
-            # Simulated entropy analysis (expandable)
-            $packedSections = @() 
-            if ($packedSections.Count -gt 0) {
-                Write-Output "Packed sections detected: $($packedSections -join ', ')"
-            } else {
-                Write-Output "No packed sections detected."
-            }
-        } elseif ($fileHeader[0] -eq 0x7F -and $fileHeader[1] -eq 0x45 -and $fileHeader[2] -eq 0x4C -and $fileHeader[3] -eq 0x46) {
-            Write-Output "Detected ELF format."
-            $packedSections = @()
-            if ($packedSections.Count -gt 0) {
-                Write-Output "Packed sections detected: $($packedSections -join ', ')"
-            } else {
-                Write-Output "No packed sections detected."
-            }
-        } else {
-            Write-Output "Unsupported file format."
-        }
+def check_entropy(pe):
+    packed_sections = []
+    for section in pe.sections:
+        entropy = section.get_entropy()
+        if entropy > 7.5:  # High entropy indicates packing or encryption
+            packed_sections.append(section.Name.decode('utf-8').strip())
+    return packed_sections
+
+try:
+    pe = pefile.PE(sys.argv[1])
+    packed_sections = check_entropy(pe)
+    if packed_sections:
+        for section in packed_sections:
+            print(f"Packed section detected: {section}")
+    else:
+        print("No packed sections detected.")
+except Exception as e:
+    print(f"Error analyzing PE file: {e}")
+"@
+        
+        # Run the Python script
+        $scriptPath = [System.IO.Path]::GetTempFileName() + ".py"
+        Set-Content -Path $scriptPath -Value $pythonScript
+        $pythonCommand = "python $scriptPath $filePath"
+        Invoke-Expression $pythonCommand
+        Remove-Item $scriptPath -Force
     } catch {
-        Write-Error "Error analyzing file format: $_"
+        Write-Host "Error performing packing analysis for PE file."
     }
 }
 
-Analyze-FilePacking -filePath $filePath
+# Function to analyze packing in ELF files using entropy (high entropy suggests packing)
+function Analyze-ELFPacking {
+    param (
+        [string]$filePath
+    )
 
-# Extract URLs from FLOSS output
-Write-Output "Extracting URLs from FLOSS output..."
-if (Test-Path $flossOutputPath) {
-    $urls = Select-String -Path $flossOutputPath -Pattern "http" | ForEach-Object { $_.Line }
+    try {
+        # Load the ELF file using lief module (via Python)
+        $pythonScript = @"
+import lief
+import sys
+
+def check_entropy(elf):
+    packed_sections = []
+    for section in elf.sections:
+        entropy = section.entropy
+        if entropy > 7.5:  # High entropy indicates packing or encryption
+            packed_sections.append(section.name)
+    return packed_sections
+
+try:
+    elf = lief.parse(sys.argv[1])
+    packed_sections = check_entropy(elf)
+    if packed_sections:
+        for section in packed_sections:
+            print(f"Packed section detected: {section}")
+    else:
+        print("No packed sections detected.")
+except Exception as e:
+    print(f"Error analyzing ELF file: {e}")
+"@
+        
+        # Run the Python script
+        $scriptPath = [System.IO.Path]::GetTempFileName() + ".py"
+        Set-Content -Path $scriptPath -Value $pythonScript
+        $pythonCommand = "python $scriptPath $filePath"
+        Invoke-Expression $pythonCommand
+        Remove-Item $scriptPath -Force
+    } catch {
+        Write-Host "Error performing packing analysis for ELF file."
+    }
+}
+
+# Function to extract URLs from FLOSS or strings output
+function Extract-URLs {
+    param (
+        [string]$outputFile
+    )
+
+    # Extract URLs from the output file using 'grep' for PE files and ELF files
+    $urls = Select-String -Path $outputFile -Pattern "http"
+    
     if ($urls) {
-        Write-Output "Found URLs:"
-        $urls | ForEach-Object { Write-Output $_ }
-    } else {
-        Write-Output "No URLs found in FLOSS output."
-    }
-} else {
-    Write-Error "FLOSS output file not found at $flossOutputPath."
-}
-
-# Compare FLOSS output with malicious API list
-$maliciousAPIPath = Join-Path -Path $PSScriptRoot -ChildPath "malapi.txt"
-if (Test-Path $maliciousAPIPath -and Test-Path $flossOutputPath) {
-    $maliciousAPIs = Get-Content -Path $maliciousAPIPath
-    $flossOutput = Get-Content -Path $flossOutputPath
-    $commonAPIs = $maliciousAPIs | ForEach-Object { if ($flossOutput -contains $_) { $_ } }
-    if ($commonAPIs) {
-        Write-Output "Malicious API calls detected:"
-        $commonAPIs | ForEach-Object { Write-Output $_ }
-    } else {
-        Write-Output "No malicious API calls found."
-    }
-} else {
-    Write-Error "Malicious API list or FLOSS output not found."
-}
-
-# VirusTotal Analysis
-Write-Output "Analyzing file with VirusTotal API..."
-$vtBaseURL = "https://www.virustotal.com/api/v3"
-$fileEndpoint = "$vtBaseURL/files/$sha256"
-
-try {
-    $fileAnalysis = Invoke-RestMethod -Uri $fileEndpoint -Headers @{ "x-apikey" = $apiKey } -Method Get
-    $fileStats = $fileAnalysis.data.attributes.last_analysis_stats
-    Write-Output "File analysis results: $fileStats"
-
-    # Analyze URLs
-    if ($urls) {
+        Write-Host "Found URLs:"
         foreach ($url in $urls) {
-            $encodedURL = [System.Web.HttpUtility]::UrlEncode($url)
-            $urlEndpoint = "$vtBaseURL/urls/$encodedURL"
-            try {
-                $urlAnalysis = Invoke-RestMethod -Uri $urlEndpoint -Headers @{ "x-apikey" = $apiKey } -Method Get
-                $urlStats = $urlAnalysis.data.attributes.last_analysis_stats
-                Write-Output "URL analysis results: $urlStats"
-            } catch {
-                Write-Output "Error analyzing URL: $_"
-            }
+            Write-Host $url
         }
+    } else {
+        Write-Host "No URLs found."
     }
-} catch {
-    Write-Output "Error analyzing file with VirusTotal: $_"
 }
 
-Write-Output "Process completed."
+# Function to check file type (PE or ELF)
+function Get-FileType {
+    param (
+        [string]$filePath
+    )
+
+    # Read the first 4 bytes to determine file type
+    $fileBytes = [System.IO.File]::ReadAllBytes($filePath)[0..3]
+    $magicBytes = [BitConverter]::ToString($fileBytes)
+
+    if ($magicBytes.StartsWith("4D-5A")) {
+        return "PE"  # PE file magic bytes (MZ)
+    } elseif ($magicBytes.StartsWith("7F-45-4C-46")) {
+        return "ELF"  # ELF file magic bytes (7F 45 4C 46)
+    } else {
+        return "Unknown"
+    }
+}
+
+# Main Script Execution
+$filePath = Read-Host "Enter the file path"
+$apiKey = Read-Host "Enter VirusTotal API key"
+
+# Get file type (PE or ELF)
+$fileType = Get-FileType -filePath $filePath
+
+# Run FLOSS or strings based on file type and check for packing
+if ($fileType -eq "PE") {
+    Write-Host "Detected PE file format."
+    Analyze-PEFile -filePath $filePath
+} elseif ($fileType -eq "ELF") {
+    Write-Host "Detected ELF file format. Using 'strings' tool."
+    Analyze-ELFFile -filePath $filePath
+} else {
+    Write-Host "Unsupported file type."
+    exit
+}
+
+# Extract URLs from the output
+Extract-URLs -outputFile "flossoutput.txt"
+
+# Get SHA256 hash of the file
+$sha256Hash = Get-FileHash -Path $filePath -Algorithm SHA256
+Write-Host "SHA256 Hash: $($sha256Hash.Hash)"
+
+# Use VirusTotal API (optional, based on your previous code example)
+# You need to implement the VirusTotal API part here if necessary, such as uploading the file and getting the analysis
