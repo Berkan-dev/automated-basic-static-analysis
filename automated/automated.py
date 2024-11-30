@@ -1,9 +1,10 @@
 import os
-import requests
 import subprocess
+import requests
 import vt
 import pefile
 import lief
+import json
 
 
 def check_entropy(sections, file_format):
@@ -80,14 +81,57 @@ def compare_files(file1_path, file2_path):
     return common_words
 
 
+def extract_urls_from_floss(file_path):
+    """Extract URLs from FLOSS output (for PE files)."""
+    print("Extracting URLs from FLOSS output...")
+    command = f'grep "http" {file_path}'
+    result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    if result.returncode == 0:
+        urls = result.stdout.strip().split('\n')
+        return urls
+    else:
+        print("Couldn't find any URL in FLOSS output.")
+        return []
+
+
+def extract_urls_from_strings(file_path):
+    """Extract URLs using 'strings' for ELF files."""
+    print("Extracting URLs using strings...")
+    command = f"strings {file_path} | grep 'http'"
+    result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    if result.returncode == 0:
+        urls = result.stdout.strip().split('\n')
+        return urls
+    else:
+        print("Couldn't find any URL using strings.")
+        return []
+
+
 # Main Script
 file = input("Enter file: ").strip()
 apiKey = input("Enter VirusTotal API key: ").strip()
 
-# Execute FLOSS command
-floss_command = f"floss {file} > flossoutput.txt"
-floss_output = subprocess.run(floss_command, shell=True, capture_output=True, text=True)
-print("FLOSS output saved as flossoutput.txt")
+# Execute FLOSS command if it's a PE file, else use strings for ELF
+file_type = None
+with open(file, "rb") as f:
+    magic = f.read(4)
+    if magic.startswith(b"MZ"):
+        file_type = "PE"
+    elif magic.startswith(b"\x7fELF"):
+        file_type = "ELF"
+
+# Run FLOSS for PE files, or strings for ELF files
+if file_type == "PE":
+    floss_command = f"floss {file} > flossoutput.txt"
+    floss_output = subprocess.run(floss_command, shell=True, capture_output=True, text=True)
+    print("FLOSS output saved as flossoutput.txt")
+elif file_type == "ELF":
+    print("Detected ELF file format. Using 'strings' tool.")
+    strings_command = f"strings {file} > flossoutput.txt"
+    strings_output = subprocess.run(strings_command, shell=True, capture_output=True, text=True)
+    print("Strings output saved to flossoutput.txt")
 
 # Print hash, MD5, and SHA256
 os.system(f"sha256sum {file}")
@@ -102,25 +146,27 @@ hash_value = output.stdout.strip()
 print("Checking for packed sections...")
 check_packed(file)
 
-# Extract URLs from FLOSS output
-print("Extracting URLs from FLOSS output...")
-command = 'grep "http" flossoutput.txt'
-result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+# Extract URLs based on file type
+urls = []
+if file_type == "PE":
+    urls = extract_urls_from_floss("flossoutput.txt")
+elif file_type == "ELF":
+    urls = extract_urls_from_strings(file)
 
-if result.returncode == 0:
-    print("Found URL: " + result.stdout.strip())
-else:
-    print("Couldn't find any URL.")
+if urls:
+    print("Found URLs:")
+    for url in urls:
+        print(url)
 
 # Compare files for malicious API calls
 file1_path = 'malapi.txt'
-file2_path = 'flossoutput.txt'
+file2_path = 'flossoutput.txt' if file_type == "PE" else file
 common_words = compare_files(file1_path, file2_path)
 
 if common_words:
     print("Malicious API calls:", common_words)
 else:
-    print("Couldn't find any malicious API calls")
+    print("Couldn't find any malicious API calls.")
 
 # Use VirusTotal API to analyze file and URLs
 print("Analyzing file with VirusTotal API...")
@@ -130,9 +176,9 @@ try:
     file_analysis = client.get_object(f"/files/{hash_value}")
     print("File analysis results:", file_analysis.last_analysis_stats)
 
-    # Extract URL ID from FLOSS output and get URL analysis
-    if result.returncode == 0:
-        url_id = vt.url_id(result.stdout.strip())
+    # Extract URL ID from FLOSS output or strings and get URL analysis
+    for url in urls:
+        url_id = vt.url_id(url)
         print(f"URL ID: {url_id}")
 
         try:
